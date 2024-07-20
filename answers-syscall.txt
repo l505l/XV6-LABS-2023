@@ -1,0 +1,7 @@
+为什么互换`p->trapframe->a0 = syscalls[num]();和`int trace_mask = p->trace_mask;`会导致结果中没有trace
+理由如下:
+1. `p->trapframe->a0 = syscalls[num]();`: 这一行调用对应的系统调用函数，并将返回值存储到 `trapframe` 结构中的 `a0` 寄存器。这是系统调用的正常返回方式，使得系统调用的结果可以传递回用户空间。
+
+2. `int trace_mask = p->trace_mask;`: 这一行获取当前进程的追踪掩码，可能用于决定是否要输出调试信息或者追踪信息。
+
+如果先执行 `int trace_mask = p->trace_mask;`，再执行 `p->trapframe->a0 = syscalls[num]();`，那么应该不会影响系统调用的正常执行和返回值的传递。但是，如果原来的代码设计是在系统调用执行后基于 `trace_mask` 做一些操作（如输出调试信息），那么互换这两句代码可能导致 `trace_mask` 被错误使用，因为它可能依赖于调用之前的状态。
