@@ -74,6 +74,35 @@ sys_sleep(void)
 int
 sys_pgaccess(void)
 {
+  uint64 addr;
+  int lenth;
+  int bitmask;
+  //读取参数
+  argaddr(0,&addr);
+  argint(1,&lenth);
+  argint(2,&bitmask);
+  //get ans
+  int ans=0;
+  struct proc *p= myproc();
+  //设置扫描页数上限
+  if(lenth>32 || lenth<0)
+    return -1;
+  for(int i=0;i<lenth;i++)
+  {
+      int va=addr+ i * PGSIZE;
+      pte_t *pte=walk(p->pagetable,va,0);
+      if(pte)
+      {
+          if(*pte & PTE_A)
+          {
+              ans |= (1<<i);
+              *pte ^= PTE_A;
+          }
+      }
+
+  }
+  if(copyout(p->pagetable, bitmask, (char *)&ans, sizeof(ans))<0)
+      return -1;
   // lab pgtbl: your code here.
   return 0;
 }
