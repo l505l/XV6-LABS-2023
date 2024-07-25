@@ -102,7 +102,25 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
+  acquire(&e1000_lock);
+  uint32 TXring_index=regs[E1000_TDT];
+  struct  tx_desc *next_desc=&tx_ring[TXring_index];
   
+  if(!next_desc->status || !E1000_TXD_STAT_DD) //检查是否溢出,检查E1000_TXD_STAT_DD 是否被设置
+  {
+    release(&e1000_lock);
+    return -1;
+  }
+  if(tx_mbufs[TXring_index])
+  {
+    mbuffree(tx_mbufs[TXring_index]);
+  }
+  next_desc->addr=(uint64)m->head;  //设置头部
+  next_desc->length=m->len; //设置长度
+  next_desc->cmd =E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS; //设置必要的cmd标志
+  tx_mbufs[TXring_index]=m; //存储m指针方便后续释放
+  regs[E1000_TDT]=(TXring_index+1)%TX_RING_SIZE;
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +133,20 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  uint32 next_ring_index=(regs[E1000_RDT]+1)%RX_RING_SIZE;
+  while(rx_ring[next_ring_index].status & E1000_RXD_STAT_DD)
+  {
+    if(rx_ring[next_ring_index].length>MBUF_SIZE)
+      panic("MBUF_SIZE OVERFLOW!");
+    rx_mbufs[next_ring_index]->len=rx_ring[next_ring_index].length;
+    //更新mubfs中的长度
+    net_rx(rx_mbufs[next_ring_index]); //交付给网络堆栈
+    rx_mbufs[next_ring_index]=mbufalloc(0); //新建mbuf替换
+    rx_ring[next_ring_index].addr=(uint64)rx_mbufs[next_ring_index]->head;
+    rx_ring[next_ring_index].status=0; //情空状态
+    next_ring_index=(next_ring_index+1)%RX_RING_SIZE;
+  }
+  regs[E1000_RDT]=(next_ring_index-1)%RX_RING_SIZE;//将E1000_RDT寄存器更新为索引 处理的最后一个环形描述符
 }
 
 void
