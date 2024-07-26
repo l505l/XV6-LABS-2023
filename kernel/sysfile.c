@@ -328,12 +328,48 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
       return -1;
     }
   }
+
+  //处理符号连接
+    if(!(omode & O_NOFOLLOW ) && ip->type == T_SYMLINK)
+    {
+      //若其指向的仍为符号连接，则递归知道找到指向的文件
+      //但是深度不能超过阈值10
+      for(int i=0;i<10;i++)
+      {
+        //读出符号链接的路径
+        if(readi(ip,0,(uint64)path,0,MAXPATH) != MAXPATH)
+        {
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        iunlockput(ip);
+        ip=namei(path);
+        if(ip==0)
+        {
+          end_op();
+          return -1;
+        }
+        ilock(ip);
+        if(ip->type != T_SYMLINK) break;
+      }
+
+      //超过最大深度仍然为符号链接则返回错误
+      if(ip->type == T_SYMLINK)
+      {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+    }
+
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
@@ -348,7 +384,8 @@ sys_open(void)
     end_op();
     return -1;
   }
-
+ 
+ 
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
@@ -501,5 +538,36 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH],path[MAXPATH];
+  //读入
+  argstr(0,target,MAXPATH);
+  argstr(1,path,MAXPATH);
+  
+  begin_op();
+
+  struct inode *ip_path=create(path,T_SYMLINK,0,0);
+  if(ip_path==0)
+  {
+    end_op();
+    return -1;  //失败
+  }
+
+  // 向inode数据块中写入target路径
+  if(writei(ip_path,0,(uint64)target,0,MAXPATH) < MAXPATH)
+  {
+    iunlockput(ip_path);
+    end_op();
+    return -1;
+  }
+  
+  iunlockput(ip_path);
+  end_op();
   return 0;
 }

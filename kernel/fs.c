@@ -385,8 +385,9 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  //直接映射块(0-10)
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0){
+    if((addr = ip->addrs[bn]) == 0){ //对应地址为0则未分配磁盘块
       addr = balloc(ip->dev);
       if(addr == 0)
         return 0;
@@ -406,10 +407,46 @@ bmap(struct inode *ip, uint bn)
     }
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
+    if((addr = a[bn]) == 0){  //找到对应地址，若不存在则分配磁盘块
       addr = balloc(ip->dev);
       if(addr){
         a[bn] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
+
+  bn-=NINDIRECT;
+
+  if(bn < NINDIRECT*NINDIRECT){
+    int index_first = bn/NINDIRECT; //一级表对应索引
+    int index_second = bn%NINDIRECT;  //二级表对应索引
+    // Load indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT+1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = addr;
+    }
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[index_first]) == 0){  //找到对应地址，若不存在则分配磁盘块
+      addr = balloc(ip->dev);
+      if(addr){
+        a[index_first] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    
+    bp = bread(ip->dev,addr); //读取二级映射
+    a = (uint*)bp->data;
+    if((addr = a[index_second]) == 0){  //找到对应地址，若不存在则分配磁盘块
+      addr = balloc(ip->dev);
+      if(addr){
+        a[index_second] = addr;
         log_write(bp);
       }
     }
@@ -425,9 +462,9 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
+  int i, j,k;
+  struct buf *bp,*bp_second;
+  uint *a,*b;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -446,6 +483,30 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  //释放二级
+  if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(j = 0; j < NINDIRECT; j++){
+      if(a[j]){
+        bp_second= bread(ip->dev,a[j]);
+        b =(uint*) bp_second->data;
+        for(k=0;k<NINDIRECT;k++)
+        {
+          if(b[k])
+          {
+            bfree(ip->dev,b[k]);
+          }
+        }
+        brelse(bp_second);
+        bfree(ip->dev, a[j]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
