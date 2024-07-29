@@ -6,6 +6,13 @@
 #include "proc.h"
 #include "defs.h"
 
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
+
+
+
 struct spinlock tickslock;
 uint ticks;
 
@@ -28,6 +35,60 @@ trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
+
+int mmap_handler(int va, int cause) {
+  int i;
+  struct proc* p = myproc();
+  // 根据地址查找属于哪一个VMA
+  for(i = 0; i < MAX_VMA_POOL; ++i) {
+    if(p->vma_pool[i].is_used && p->vma_pool[i].addr <= va && va <= p->vma_pool[i].addr + p->vma_pool[i].len - 1) {
+      break;
+    }
+  }
+  if(i == MAX_VMA_POOL)
+    return -1;
+
+  int pte_flags = PTE_U;
+  if(p->vma_pool[i].prot & PROT_READ) pte_flags |= PTE_R;
+  if(p->vma_pool[i].prot & PROT_WRITE) pte_flags |= PTE_W;
+  if(p->vma_pool[i].prot & PROT_EXEC) pte_flags |= PTE_X;
+
+
+  struct file* vf = p->vma_pool[i].f;
+  // 读导致的页面错误
+  if(cause == 13 && vf->readable == 0) return -1;
+  // 写导致的页面错误
+  if(cause == 15 && vf->writable == 0) return -1;
+
+  void* pa = kalloc();
+  if(pa == 0)
+    return -1;
+  memset(pa, 0, PGSIZE);
+
+  // 读取文件内容
+  ilock(vf->ip);
+  // 计算当前页面读取文件的偏移量，实验中p->vma[i].offset总是0
+  // 要按顺序读读取，例如内存页面A,B和文件块a,b
+  // 则A读取a，B读取b，而不能A读取b，B读取a
+  int offset = p->vma_pool[i].offset + PGROUNDDOWN(va - p->vma_pool[i].addr);
+  int readbytes = readi(vf->ip, 0, (uint64)pa, offset, PGSIZE);
+  // 什么都没有读到
+  if(readbytes == 0) {
+    iunlock(vf->ip);
+    kfree(pa);
+    return -1;
+  }
+  iunlock(vf->ip);
+
+  // 添加页面映射
+  if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)pa, pte_flags) != 0) {
+    kfree(pa);
+    return -1;
+  }
+
+  return 0;
+}
+
 
 //
 // handle an interrupt, exception, or system call from user space.
@@ -67,6 +128,16 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  }else if(r_scause() == 13 || r_scause() == 15){
+    #ifdef LAB_MMAP
+    // 读取产生页面故障的虚拟地址，并判断是否位于有效区间
+    uint64 va = r_stval();
+    if(PGROUNDUP(p->trapframe->sp) - 1 < va && va < p->sz) {
+      if(mmap_handler(r_stval(), r_scause()) != 0) p->killed = 1;
+    } else{
+      p->killed = 1;
+    }
+#endif
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

@@ -18,6 +18,20 @@ struct context {
   uint64 s11;
 };
 
+#define MAX_VMA_POOL 16
+struct VMA
+{
+  int is_used;  //这个VMA是否被使用
+  uint64 addr;  //在内存中映射的内存地址
+  int len;   //映射的长度
+  int prot;     //权限
+  int flags;
+  int fd; //文件描述符
+  int offset;   //值一直为0
+  struct file *f;//映射的文件
+};
+
+
 // Per-CPU state.
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
@@ -104,4 +118,7 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  struct VMA vma_pool[MAX_VMA_POOL];
+  
 };

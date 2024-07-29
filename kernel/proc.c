@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -145,6 +146,10 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  //初始化vma_pool
+  for(int i=0;i < MAX_VMA_POOL;i++)
+    p->vma_pool[i].is_used=0;
 
   return p;
 }
@@ -308,6 +313,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  //将父进程np的vma_pool拷贝给子进程p
+  for(i = 0; i < MAX_VMA_POOL; ++i) {
+    if(p->vma_pool[i].is_used) {
+      memmove(&np->vma_pool[i], &p->vma_pool[i], sizeof(p->vma_pool[i]));
+      filedup(p->vma_pool[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -357,6 +370,18 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // 将进程的已映射区域取消映射
+  for(int i = 0; i < MAX_VMA_POOL; ++i) {
+    if(p->vma_pool[i].is_used) {
+      if(p->vma_pool[i].flags == MAP_SHARED && (p->vma_pool[i].prot & PROT_WRITE) != 0) {
+        filewrite(p->vma_pool[i].f, p->vma_pool[i].addr, p->vma_pool[i].len);
+      }
+      fileclose(p->vma_pool[i].f);
+      uvmunmap(p->pagetable, p->vma_pool[i].addr, p->vma_pool[i].len / PGSIZE, 1);
+      p->vma_pool[i].is_used = 0;
     }
   }
 
@@ -685,4 +710,30 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+struct VMA*
+get_proc_vma_pool()
+{
+  return myproc()->vma_pool;
+}
+
+uint64
+vma_alloc()
+{
+  struct VMA* vmaPool=get_proc_vma_pool();
+  for(int i=0;i<MAX_VMA_POOL;i++)
+  {
+    struct VMA* vma=vmaPool+i;
+    if(vma->is_used) continue;
+    vma->is_used=1;
+    return (uint64) vma;
+  }
+  return 0;
+}
+
+void
+vma_free(uint64 vma)
+{
+  ((struct VMA*) vma)->is_used=0;
 }

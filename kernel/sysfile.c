@@ -503,3 +503,147 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int len,fd,prot,flags,offset;
+  struct file* f;
+
+  //获取传入参数
+  argaddr(0,&addr);
+  argint(1,&len);
+  argint(2,&prot);
+  argint(3,&flags);
+  argfd(4,&fd,&f);
+  argint(5,&offset);
+
+  //文件不可写则不允许拥有PROT_WRITE权限时映射为MAP_SHARED
+  if(!f->writable && (prot & PROT_WRITE) && flags == MAP_SHARED)
+    return -1;
+  struct proc* p = myproc();
+  // 没有足够的虚拟地址空间
+  if(p->sz + len > MAXVA)
+    return -1;
+
+  // 遍历查找未使用的VMA结构体
+  for(int i = 0; i < MAX_VMA_POOL; ++i) {
+    if(p->vma_pool[i].is_used == 0) {
+      p->vma_pool[i].is_used = 1;
+      p->vma_pool[i].addr = p->sz;
+      p->vma_pool[i].len = len;
+      p->vma_pool[i].flags = flags;
+      p->vma_pool[i].prot = prot;
+      p->vma_pool[i].f = f;
+      p->vma_pool[i].fd = fd;
+      p->vma_pool[i].offset = offset;
+
+      // 增加文件的引用计数
+      filedup(f);
+
+      p->sz += len;
+      return p->vma_pool[i].addr;
+    }
+  }
+
+  return -1;
+}
+
+int
+munmap_upgrade(uint64 addr, int len)
+{
+  int i;
+  struct proc *p=myproc();
+  //在vma_pool中找到addr对应的vma
+  struct VMA *vma =0;
+  for(i=0;i<MAX_VMA_POOL;i++)
+  {
+    vma=p->vma_pool+i;
+    if(vma->is_used && addr >=vma->addr && (addr + len)< (vma->addr+vma->len))
+      break;
+  }
+  if(i > MAX_VMA_POOL)
+    return -1;
+  //根据vma信息将数据写入文件
+  uint64 end_addr=addr+len;
+  if(vma->flags == MAP_SHARED && vma->f->writable){
+    uint64 cur_addr = addr;
+    while(cur_addr < end_addr){
+      int sz;
+      if(end_addr-cur_addr>=PGSIZE)
+        sz=PGSIZE;
+      else sz=end_addr-cur_addr;
+      begin_op();
+      ilock(vma->f->ip);
+      if(writei(vma->f->ip,1,cur_addr,cur_addr-vma->addr,sz) != sz)
+        return -1;
+      iunlock(vma->f->ip);
+      end_op();
+      uvmunmap(p->pagetable,cur_addr,1,1);
+      cur_addr += PGSIZE;
+    }
+  }
+  // 完成写回，更新vma
+  if(addr == vma->addr)  //如果addr是mmap内存头部
+  {
+    vma->addr += len;
+    vma->len -=len;
+  }
+  else if(addr+len == vma->addr + vma->len)  //如果addr为mmap内存尾部
+  {
+    vma->len -=len;
+  }
+  //如果mmap内存全被munmmap，则需要释放vma以及file的引用
+  if(vma->len ==0 && vma->is_used){
+    filedup(vma->f);
+    vma->is_used=0;
+  }
+  return 0;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+  argaddr(0,&addr);
+  argint(1,&len);
+  int i;
+  struct proc* p = myproc();
+  for(i = 0; i < MAX_VMA_POOL; ++i) {
+    if(p->vma_pool[i].is_used && p->vma_pool[i].len >= len) {
+      // 根据提示，munmap的地址范围只能是
+      // 1. 起始位置
+      if(p->vma_pool[i].addr == addr) {
+        p->vma_pool[i].addr += len;
+        p->vma_pool[i].len -= len;
+        break;
+      }
+      // 2. 结束位置
+      if(addr + len == p->vma_pool[i].addr + p->vma_pool[i].len) {
+        p->vma_pool[i].len -= len;
+        break;
+      }
+    }
+  }
+  if(i == MAX_VMA_POOL)
+    return -1;
+
+  // 将MAP_SHARED页面写回文件系统
+  if(p->vma_pool[i].flags == MAP_SHARED && (p->vma_pool[i].prot & PROT_WRITE) != 0) {
+    filewrite(p->vma_pool[i].f, addr, len);
+  }
+
+  // 判断此页面是否存在映射
+  uvmunmap(p->pagetable, addr, len / PGSIZE, 1);
+
+
+  // 当前VMA中全部映射都被取消
+  if(p->vma_pool[i].len == 0) {
+    fileclose(p->vma_pool[i].f);
+    p->vma_pool[i].is_used = 0;
+  }
+
+  return 0;
+}
